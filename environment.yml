@@ -2,6 +2,7 @@ name: rainbow
 channels:
   - pytorch
 dependencies:
+  - python=3.9
   - plotly
   - pytorch
   - tqdm
