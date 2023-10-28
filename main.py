@@ -147,66 +147,66 @@ if args.evaluate:
     print('Avg. reward: ' + str(avg_reward) + ' | Avg. Q: ' + str(avg_Q))
 else:
     # Training loop
-  dqn.train()
-  done = True
+    dqn.train()
+    done = True
 
-  for T in trange(1, args.T_max + 1):
-      if done:
-          state = env.reset()
-    
-      env.render()
-      
-      if T % args.replay_frequency == 0:
-        dqn.reset_noise()  # Draw a new set of noisy weights
+    for T in trange(1, args.T_max + 1):
+        if done:
+            state = env.reset()
 
-      action = dqn.act(state)  # Choose an action epsilon-greedily (with noisy weights)
-      ps = dqn.online_net(state, log=False)
-      ps_a = ps[0][action]
+        env.render()
 
-      next_state, reward, done = env.step(action)  # Step
-      argmax_action = dqn.act(next_state)
+        if T % args.replay_frequency == 0:
+            dqn.reset_noise()  # Draw a new set of noisy weights
 
-      dqn.target_net.reset_noise()
-      pns = dqn.target_net(next_state)
+        action = dqn.act(state)  # Choose an action epsilon-greedily (with noisy weights)
+        ps = dqn.online_net(state, log=False)
+        ps_a = ps[0][action]
 
-      pns_a = pns[0][argmax_action]
-      nonterminal = not done
-      # Compute Tz (Bellman operator T applied to z)        
-      Tz = reward +  nonterminal * (args.discount ** args.multi_step) * support  
-      Tz = Tz.clamp(min=args.V_min, max=args.V_max)  # Clamp between supported values
-      # Compute L2 projection of Tz onto fixed support z
-      b = (Tz - args.V_min) / delta_z  # b = (Tz - Vmin) / Δz
-      l, u = b.floor().to(torch.int64), b.ceil().to(torch.int64)
-      # Fix disappearing probability mass when l = b = u (b is int)
-      l[(u > 0) * (l == u)] -= 1
-      u[(l < (args.atoms - 1)) * (l == u)] += 1
+        next_state, reward, done = env.step(action)  # Step
+        argmax_action = dqn.act(next_state)
 
-      # Distribute probability of Tz
-      m = state.new_zeros(args.atoms)
-      m.view(-1).index_add_(0, l.view(-1), (pns_a * (u.float() - b)).view(-1))  # m_l = m_l + p(s_t+n, a*)(u - b)
-      m.view(-1).index_add_(0, u.view(-1), (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
-      
-      ps_a_data = ps_a.detach().numpy()
-      m_data = m.detach().numpy()
+        dqn.target_net.reset_noise()
+        pns = dqn.target_net(next_state)
 
-      dists = np.vstack((ps_a_data, m_data))
-      df = pd.DataFrame(dists.T , columns = ['ps_a', 'm'], index = support.numpy())
-      df.to_csv('dists.csv')
-      if T == 1:
-          graph = subprocess.Popen(['python', 'graph.py'])
+        pns_a = pns[0][argmax_action]
+        nonterminal = not done
+        # Compute Tz (Bellman operator T applied to z)
+        Tz = reward +  nonterminal * (args.discount ** args.multi_step) * support
+        Tz = Tz.clamp(min=args.V_min, max=args.V_max)  # Clamp between supported values
+        # Compute L2 projection of Tz onto fixed support z
+        b = (Tz - args.V_min) / delta_z  # b = (Tz - Vmin) / Δz
+        l, u = b.floor().to(torch.int64), b.ceil().to(torch.int64)
+        # Fix disappearing probability mass when l = b = u (b is int)
+        l[(u > 0) * (l == u)] -= 1
+        u[(l < (args.atoms - 1)) * (l == u)] += 1
 
-      if args.reward_clip > 0:
-           reward = max(min(reward, args.reward_clip), -args.reward_clip)  # Clip rewards
-      mem.append(state, action, reward, done)  # Append transition to memory
+        # Distribute probability of Tz
+        m = state.new_zeros(args.atoms)
+        m.view(-1).index_add_(0, l.view(-1), (pns_a * (u.float() - b)).view(-1))  # m_l = m_l + p(s_t+n, a*)(u - b)
+        m.view(-1).index_add_(0, u.view(-1), (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
 
-    # Train and test
-      if T >= args.learn_start:
-          mem.priority_weight = min(mem.priority_weight + priority_weight_increase, 1)  # Anneal importance sampling weight β to 1
+        ps_a_data = ps_a.detach().numpy()
+        m_data = m.detach().numpy()
 
-          if T % args.replay_frequency == 0:
+        dists = np.vstack((ps_a_data, m_data))
+        df = pd.DataFrame(dists.T , columns = ['ps_a', 'm'], index = support.numpy())
+        df.to_csv('dists.csv')
+        if T == 1:
+            graph = subprocess.Popen(['python', 'graph.py'])
+
+        if args.reward_clip > 0:
+            reward = max(min(reward, args.reward_clip), -args.reward_clip)  # Clip rewards
+        mem.append(state, action, reward, done)  # Append transition to memory
+
+        # Train and test
+        if T >= args.learn_start:
+            mem.priority_weight = min(mem.priority_weight + priority_weight_increase, 1)  # Anneal importance sampling weight β to 1
+
+            if T % args.replay_frequency == 0:
                 dqn.learn(mem)  # Train with n-step distributional double-Q learning
 
-          if T % args.evaluation_interval == 0:
+            if T % args.evaluation_interval == 0:
                 dqn.eval()  # Set DQN (online network) to evaluation mode
                 avg_reward, avg_Q = test(args, T, dqn, val_mem, metrics, results_dir)  # Test
                 log('T = ' + str(T) + ' / ' + str(args.T_max) + ' | Avg. reward: ' + str(avg_reward) + ' | Avg. Q: ' + str(avg_Q))
@@ -214,16 +214,16 @@ else:
 
               # If memory path provided, save it
                 if args.memory is not None:
-                  save_memory(mem, args.memory, args.disable_bzip_memory)
+                    save_memory(mem, args.memory, args.disable_bzip_memory)
 
-          # Update target network
-          if T % args.target_update == 0:
-              dqn.update_target_net()
+            # Update target network
+            if T % args.target_update == 0:
+                dqn.update_target_net()
 
-          # Checkpoint the network
-          if (args.checkpoint_interval != 0) and (T % args.checkpoint_interval == 0):
-              dqn.save(results_dir, 'checkpoint.pth')
+            # Checkpoint the network
+            if (args.checkpoint_interval != 0) and (T % args.checkpoint_interval == 0):
+                dqn.save(results_dir, 'checkpoint.pth')
 
-      state = next_state
+        state = next_state
 
 env.close()
