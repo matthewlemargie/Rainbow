@@ -138,9 +138,6 @@ while T < args.evaluation_size:
     state = next_state
     T += 1
 
-support = torch.linspace(args.V_min, args.V_max, args.atoms).to(device=args.device)
-delta_z = (args.V_max - args.V_min) / (args.atoms - 1)
-
 if args.evaluate:
     dqn.eval()  # Set DQN (online network) to evaluation mode
     avg_reward, avg_Q = test(args, 0, dqn, val_mem, metrics, results_dir, evaluate=True)  # Test
@@ -154,8 +151,6 @@ else:
         if done:
             state = env.reset()
 
-        env.render()
-
         if T % args.replay_frequency == 0:
             dqn.reset_noise()  # Draw a new set of noisy weights
 
@@ -166,44 +161,6 @@ else:
         if args.reward_clip > 0:
             reward = max(min(reward, args.reward_clip), -args.reward_clip)  # Clip rewards
         mem.append(state, action, reward, done)  # Append transition to memory
-
-        with torch.no_grad():
-            ps = dqn.online_net(state, log=False)
-            ps_a = ps[0][action]
-
-            argmax_action = dqn.act(next_state)
-
-            dqn.target_net.reset_noise()
-            pns = dqn.target_net(next_state)
-
-            pns_a = pns[0][argmax_action]
-            nonterminal = not done
-            # Compute Tz (Bellman operator T applied to z)
-            Tz = reward +  nonterminal * (args.discount ** args.multi_step) * support
-            Tz = Tz.clamp(min=args.V_min, max=args.V_max)  # Clamp between supported values
-            # Compute L2 projection of Tz onto fixed support z
-            b = (Tz - args.V_min) / delta_z  # b = (Tz - Vmin) / Δz
-            l, u = b.floor().to(torch.int64), b.ceil().to(torch.int64)
-            # Fix disappearing probability mass when l = b = u (b is int)
-            l[(u > 0) * (l == u)] -= 1
-            u[(l < (args.atoms - 1)) * (l == u)] += 1
-
-            # Distribute probability of Tz
-            m = state.new_zeros(args.atoms)
-            m.view(-1).index_add_(0, l.view(-1), (pns_a * (u.float() - b)).view(-1))  # m_l = m_l + p(s_t+n, a*)(u - b)
-            m.view(-1).index_add_(0, u.view(-1), (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
-
-            ps_a_data = ps_a.cpu().detach().numpy()
-            m_data = m.cpu().detach().numpy()
-
-            dists = np.vstack((ps_a_data, m_data))
-            df = pd.DataFrame(dists.T , columns = ['ps_a', 'm'], index = support.cpu().detach().numpy())
-            df.to_csv('dists.csv')
-
-        if T == 1:
-            graph = subprocess.Popen(['python', 'graph.py'])
-        
-        dqn.online_net.zero_grad()
 
         # Train and test
         if T >= args.learn_start:

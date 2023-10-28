@@ -6,6 +6,10 @@ from plotly.graph_objs import Scatter
 from plotly.graph_objs.scatter import Line
 import torch
 
+import pandas as pd
+import numpy as np
+import subprocess
+
 from env import Env
 
 
@@ -18,20 +22,69 @@ def test(args, T, dqn, val_mem, metrics, results_dir, evaluate=False):
 
   # Test performance over several episodes
   done = True
+  support = torch.linspace(args.V_min, args.V_max, args.atoms).to(device=args.device)
+  delta_z = (args.V_max - args.V_min) / (args.atoms - 1)
+  graph = subprocess.Popen(['python', 'graph.py'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+  
   for _ in range(args.evaluation_episodes):
     while True:
       if done:
         state, reward_sum, done = env.reset(), 0, False
 
       action = dqn.act_e_greedy(state)  # Choose an action greedily
+      ps = dqn.online_net(state, log=False)
+      ps_a = ps[0][action]
+
       state, reward, done = env.step(action)  # Step
       reward_sum += reward
+
+      with torch.no_grad():
+        if args.reward_clip > 0:
+          reward = max(min(reward, args.reward_clip), -args.reward_clip)  # Clip rewards
+
+        argmax_action = dqn.act(state)
+
+        dqn.target_net.reset_noise()
+        pns = dqn.target_net(state)
+
+        pns_a = pns[0][argmax_action]
+        nonterminal = not done
+        # Compute Tz (Bellman operator T applied to z)
+        Tz = reward +  nonterminal * (args.discount ** args.multi_step) * support
+        Tz = Tz.clamp(min=args.V_min, max=args.V_max)  # Clamp between supported values
+        # Compute L2 projection of Tz onto fixed support z
+        b = (Tz - args.V_min) / delta_z  # b = (Tz - Vmin) / Δz
+        l, u = b.floor().to(torch.int64), b.ceil().to(torch.int64)
+        # Fix disappearing probability mass when l = b = u (b is int)
+        l[(u > 0) * (l == u)] -= 1
+        u[(l < (args.atoms - 1)) * (l == u)] += 1
+
+        # Distribute probability of Tz
+        m = state.new_zeros(args.atoms)
+        m.view(-1).index_add_(0, l.view(-1), (pns_a * (u.float() - b)).view(-1))  # m_l = m_l + p(s_t+n, a*)(u - b)
+        m.view(-1).index_add_(0, u.view(-1), (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
+
+        ps_a_data = ps_a.cpu().detach().numpy()
+        m_data = m.cpu().detach().numpy()
+
+        dists = np.vstack((ps_a_data, m_data))
+        df = pd.DataFrame(dists.T , columns = ['ps_a', 'm'], index = support.cpu().detach().numpy())
+        df.to_csv('dists.csv')
+
+        graph.stdin.write("\n")
+        graph.stdin.flush()
+        
+        graph.stdout.readline()
+      
+      dqn.online_net.zero_grad()
+
       if args.render:
         env.render()
 
       if done:
         T_rewards.append(reward_sum)
         break
+  graph.kill()
   env.close()
 
   # Test Q-values over validation memory
